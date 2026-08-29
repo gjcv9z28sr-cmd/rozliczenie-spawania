@@ -1,5 +1,5 @@
 name = "rozliczenie-spawania"
-main = "src/worker.js"
+main = "worker.js"
 compatibility_date = "2026-08-29"
 
 [[r2_buckets]]
