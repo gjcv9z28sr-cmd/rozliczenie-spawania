@@ -1,0 +1,7 @@
+name = "rozliczenie-spawania"
+main = "src/worker.js"
+compatibility_date = "2026-08-29"
+
+[[r2_buckets]]
+binding = "STORAGE"
+bucket_name = "rozliczanie-spawania"
