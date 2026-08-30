@@ -1,5 +1,4 @@
 import JSZip from "jszip";
-import * as XLSX from "xlsx";
 
 const TEMPLATE_KEY = "#XXXXX.xlsx";
 
@@ -18,15 +17,22 @@ export default {
 
     const url = new URL(request.url);
 
-    if (request.method === "GET" && url.pathname === "/") {
+    if (
+      request.method === "GET" &&
+      url.pathname === "/"
+    ) {
       return new Response(page(), {
         headers: {
-          "content-type": "text/html; charset=utf-8"
+          "content-type":
+            "text/html; charset=utf-8"
         }
       });
     }
 
-    if (request.method === "POST" && url.pathname === "/api/job") {
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/job"
+    ) {
       return processJob(request, env);
     }
 
@@ -46,21 +52,31 @@ async function processJob(request, env) {
   const form = await request.formData();
 
   const orderLine =
-    String(form.get("orderLine") || "").trim();
+    String(
+      form.get("orderLine") || ""
+    ).trim();
 
   const uploadedZip =
     form.get("archive");
 
   if (!orderLine) {
-    return json({
-      error: "Brak wiersza danych zlecenia."
-    }, 400);
+    return json(
+      {
+        error:
+          "Brak wiersza danych zlecenia."
+      },
+      400
+    );
   }
 
   if (!(uploadedZip instanceof File)) {
-    return json({
-      error: "Brak paczki ZIP."
-    }, 400);
+    return json(
+      {
+        error:
+          "Brak paczki ZIP."
+      },
+      400
+    );
   }
 
   if (
@@ -68,9 +84,13 @@ async function processJob(request, env) {
       .toLowerCase()
       .endsWith(".zip")
   ) {
-    return json({
-      error: "Przesłany plik nie jest ZIP."
-    }, 400);
+    return json(
+      {
+        error:
+          "Przesłany plik nie jest ZIP."
+      },
+      400
+    );
   }
 
 
@@ -78,24 +98,18 @@ async function processJob(request, env) {
      DANE ZLECENIA
      ------------------------------------------------------- */
 
-  const order = parseOrderLine(orderLine);
+  const order =
+    parseOrderLine(orderLine);
 
 
   /* -------------------------------------------------------
-     ID ZADANIA
-     ------------------------------------------------------- */
-
-  const id = crypto.randomUUID();
-
-
-  /* -------------------------------------------------------
-     ODCZYT ZIP
+     ZIP
      ------------------------------------------------------- */
 
   const zipBuffer =
     await uploadedZip.arrayBuffer();
 
-  const inputZip =
+  const zip =
     await JSZip.loadAsync(zipBuffer);
 
 
@@ -103,121 +117,201 @@ async function processJob(request, env) {
      SZUKAMY XLSX ZACZYNAJĄCEGO SIĘ OD #
      ------------------------------------------------------- */
 
-  const sourceXlsx =
-    await findSourceXlsx(inputZip);
+  const source =
+    await findSourceXlsx(zip);
 
-  if (!sourceXlsx) {
-    return json({
-      error:
-        "W paczce nie znaleziono pliku XLSX zaczynającego się od #."
-    }, 400);
+  if (!source) {
+    return json(
+      {
+        error:
+          "W paczce nie znaleziono pliku XLSX zaczynającego się od #."
+      },
+      400
+    );
   }
 
 
-  /* -------------------------------------------------------
-     ODCZYTUJEMY XLSX ŹRÓDŁOWY
-     ------------------------------------------------------- */
-
-  const sourceBuffer =
-    await sourceXlsx.async("arraybuffer");
-
-  const sourceWorkbook =
-    XLSX.read(sourceBuffer, {
-      type: "array",
-      cellDates: true
-    });
-
-
-  /* -------------------------------------------------------
-     NUMER ROZLICZENIA
-     ------------------------------------------------------- */
+  /*
+   * NUMER MUSI BYĆ DOKŁADNIE:
+   *
+   * # + 5 cyfr
+   *
+   * np. #21482
+   */
 
   const runNumber =
-    extractRunNumber(
-      sourceXlsx.name
+    extractFiveDigitNumber(
+      source.name
     );
 
   if (!runNumber) {
-    return json({
-      error:
-        "Nie udało się odczytać numeru rozpoczynającego się od #."
-    }, 400);
+    return json(
+      {
+        error:
+          "Nie znaleziono pięciocyfrowego numeru rozpoczynającego się od #."
+      },
+      400
+    );
   }
 
 
   /* -------------------------------------------------------
-     INFORMACJE O PRZEBIEGACH
+     ODCZYT ŹRÓDŁOWEGO XLSX
+     ------------------------------------------------------- */
+
+  const sourceBuffer =
+    await source.file.async(
+      "arraybuffer"
+    );
+
+  const sourceZip =
+    await JSZip.loadAsync(
+      sourceBuffer
+    );
+
+
+  const sourceWorkbook =
+    await readWorkbook(sourceZip);
+
+
+  /* -------------------------------------------------------
+     ODCZYT INFORMACJI O PRZEBIEGACH
      ------------------------------------------------------- */
 
   const runInfo =
-    extractRunInformation(
+    await extractRunInformation(
+      sourceZip,
       sourceWorkbook
     );
 
 
   /* -------------------------------------------------------
-     SZABLON MACIERZYSTY
+     POBIERAMY MACIERZYSTY SKOROSZYT
      ------------------------------------------------------- */
 
   const templateObject =
-    await env.STORAGE.get(TEMPLATE_KEY);
+    await env.STORAGE.get(
+      TEMPLATE_KEY
+    );
 
   if (!templateObject) {
-    return json({
-      error:
-        `Nie znaleziono ${TEMPLATE_KEY} w R2.`
-    }, 500);
+
+    return json(
+      {
+        error:
+          `Nie znaleziono ${TEMPLATE_KEY} w R2.`
+      },
+      500
+    );
+
   }
+
 
   const templateBuffer =
     await templateObject.arrayBuffer();
 
 
+  /*
+   * KLUCZOWA RZECZ:
+   *
+   * Otwieramy macierzysty XLSX jako ZIP.
+   *
+   * Nie przebudowujemy skoroszytu biblioteką XLSX.
+   * Dzięki temu zachowujemy formatowanie.
+   */
+
+  const resultZip =
+    await JSZip.loadAsync(
+      templateBuffer
+    );
+
+
   /* -------------------------------------------------------
-     OTWIERAMY SZABLON
+     ZNAJDUJEMY ARKUSZ ARKUSZ1
      ------------------------------------------------------- */
 
-  const workbook =
-    XLSX.read(templateBuffer, {
-      type: "array",
-      cellStyles: true,
-      cellDates: true
-    });
+  const resultWorkbook =
+    await readWorkbook(
+      resultZip
+    );
+
+  const resultSheetPath =
+    await findSheetPath(
+      resultZip,
+      resultWorkbook,
+      "Arkusz1"
+    );
+
+  if (!resultSheetPath) {
+
+    return json(
+      {
+        error:
+          "W macierzystym skoroszycie nie znaleziono Arkusz1."
+      },
+      500
+    );
+
+  }
 
 
   /* -------------------------------------------------------
-     UZUPEŁNIAMY ROZLICZENIE
+     XML ARKUSZA
      ------------------------------------------------------- */
 
-  fillSettlement(
-    workbook,
-    runNumber,
-    runInfo
+  let resultSheetXml =
+    await getXml(
+      resultZip,
+      resultSheetPath
+    );
+
+
+  /* -------------------------------------------------------
+     B2 = #21482
+     ------------------------------------------------------- */
+
+  resultSheetXml =
+    setCellValue(
+      resultSheetXml,
+      "B2",
+      runNumber
+    );
+
+
+  /* -------------------------------------------------------
+     MUFY + SPRAWY
+     ------------------------------------------------------- */
+
+  resultSheetXml =
+    writeMuffs(
+      resultSheetXml,
+      runInfo.splicedMuffs
+    );
+
+
+  /* -------------------------------------------------------
+     ZAPIS ARKUSZA
+     ------------------------------------------------------- */
+
+  resultZip.file(
+    resultSheetPath,
+    resultSheetXml
   );
 
 
   /* -------------------------------------------------------
-     GENERUJEMY XLSX
+     GENERUJEMY GOTOWY XLSX
      ------------------------------------------------------- */
 
   const resultBuffer =
-    XLSX.write(workbook, {
-      bookType: "xlsx",
-      type: "array",
-      cellStyles: true
+    await resultZip.generateAsync({
+      type: "arraybuffer",
+      compression: "STORE"
     });
 
 
   /* -------------------------------------------------------
-     NAZWA WYNIKU
-     ------------------------------------------------------- */
-
-  const resultFileName =
-    `${runNumber}.xlsx`;
-
-
-  /* -------------------------------------------------------
-     NAZWA KATALOGU
+     NAZWA KATALOGU ZLECENIA
      ------------------------------------------------------- */
 
   const rootFolder =
@@ -228,28 +322,37 @@ async function processJob(request, env) {
 
 
   /* -------------------------------------------------------
-     ZAPIS PACZKI ŹRÓDŁOWEJ
+     ZAPIS ŹRÓDŁOWEJ PACZKI
      ------------------------------------------------------- */
 
+  const id =
+    crypto.randomUUID();
+
   const inputKey =
-    `jobs/${id}/input/${uploadedZip.name}`;
+    `jobs/${id}/input/${sanitizeFileName(
+      uploadedZip.name
+    )}`;
+
 
   await env.STORAGE.put(
     inputKey,
     zipBuffer,
     {
       httpMetadata: {
-        contentType: "application/zip"
+        contentType:
+          "application/zip"
       }
     }
   );
 
 
   /* -------------------------------------------------------
-     TWORZYMY KATALOGI
+     KATALOGI
      ------------------------------------------------------- */
 
-  for (const folder of FOLDERS) {
+  for (
+    const folder of FOLDERS
+  ) {
 
     await env.STORAGE.put(
       `jobs/${id}/output/${rootFolder}/${folder}/`,
@@ -260,11 +363,16 @@ async function processJob(request, env) {
 
 
   /* -------------------------------------------------------
-     ZAPIS ROZLICZENIA
+     WYNIK:
+     #21482.xlsx
      ------------------------------------------------------- */
+
+  const resultFileName =
+    `${runNumber}.xlsx`;
 
   const resultKey =
     `jobs/${id}/output/${rootFolder}/6) Rozliczenie/${resultFileName}`;
+
 
   await env.STORAGE.put(
     resultKey,
@@ -279,30 +387,51 @@ async function processJob(request, env) {
 
 
   /* -------------------------------------------------------
-     INFORMACJA O WYNIKU
+     RAPORT ZADANIA
      ------------------------------------------------------- */
 
   const job = {
 
     id,
 
-    status: "COMPLETED",
+    status:
+      "COMPLETED",
 
     input: {
-      rawLine: orderLine,
-      ...order
+      rawLine:
+        orderLine,
+
+      orderNumber:
+        order.orderNumber,
+
+      date:
+        order.date,
+
+      operator:
+        order.operator,
+
+      code:
+        order.code,
+
+      description:
+        order.description
     },
 
     source: {
-      file: sourceXlsx.name,
+      file:
+        source.name,
+
       runNumber
     },
 
-    extracted: runInfo,
+    extracted:
+      runInfo,
 
     output: {
       rootFolder,
-      workbook: resultKey
+
+      workbook:
+        resultKey
     },
 
     createdAt:
@@ -313,7 +442,11 @@ async function processJob(request, env) {
 
   await env.STORAGE.put(
     `jobs/${id}/job.json`,
-    JSON.stringify(job, null, 2),
+    JSON.stringify(
+      job,
+      null,
+      2
+    ),
     {
       httpMetadata: {
         contentType:
@@ -323,7 +456,10 @@ async function processJob(request, env) {
   );
 
 
-  return json(job, 200);
+  return json(
+    job,
+    200
+  );
 }
 
 
@@ -336,76 +472,451 @@ function parseOrderLine(line) {
   const columns =
     line
       .split(/\t+/)
-      .map(x => x.trim())
-      .filter(Boolean);
+      .map(
+        x => x.trim()
+      );
 
-  if (columns.length < 5) {
+  if (
+    columns.length < 5
+  ) {
+
     throw new Error(
       "Wiersz zlecenia musi zawierać minimum 5 kolumn."
     );
+
   }
 
   return {
 
-    orderNumber: columns[0],
+    orderNumber:
+      columns[0],
 
-    date: columns[1],
+    date:
+      columns[1],
 
-    operator: columns[2],
+    operator:
+      columns[2],
 
-    code: columns[3],
+    code:
+      columns[3],
 
     description:
-      columns.slice(4).join(" ")
+      columns
+        .slice(4)
+        .join(" ")
+        .trim()
 
   };
 }
 
 
 /* =========================================================
-   SZUKANIE XLSX Z #
+   SZUKANIE PLIKU XLSX Z #
    ========================================================= */
 
 async function findSourceXlsx(zip) {
 
-  let found = null;
+  let result =
+    null;
 
-  zip.forEach((path, file) => {
+  zip.forEach(
+    (path, file) => {
 
-    if (found) return;
+      if (result) {
+        return;
+      }
 
-    const name =
-      path.split("/").pop();
+      if (file.dir) {
+        return;
+      }
 
-    if (
-      !file.dir &&
-      name.startsWith("#") &&
-      name.toLowerCase().endsWith(".xlsx")
-    ) {
-      found = file;
-      found.name = name;
+      const name =
+        path
+          .split("/")
+          .pop();
+
+      if (
+        name.startsWith("#") &&
+        name
+          .toLowerCase()
+          .endsWith(".xlsx")
+      ) {
+
+        result = {
+          name,
+          file
+        };
+
+      }
+
     }
+  );
 
-  });
-
-  return found;
+  return result;
 }
 
 
 /* =========================================================
-   NUMER PRZEBIEGU
+   # + 5 CYFR
    ========================================================= */
 
-function extractRunNumber(filename) {
+function extractFiveDigitNumber(
+  filename
+) {
 
   const match =
-    filename.match(/^#[^.\s]+/);
+    filename.match(
+      /#(\d{5})(?!\d)/
+    );
 
   if (!match) {
     return null;
   }
 
-  return match[0];
+  return `#${match[1]}`;
+}
+
+
+/* =========================================================
+   WORKBOOK.XML
+   ========================================================= */
+
+async function readWorkbook(zip) {
+
+  const file =
+    zip.file(
+      "xl/workbook.xml"
+    );
+
+  if (!file) {
+
+    throw new Error(
+      "Brak xl/workbook.xml."
+    );
+
+  }
+
+  return await file.async(
+    "string"
+  );
+}
+
+
+/* =========================================================
+   ZNALEZIENIE ŚCIEŻKI ARKUSZA
+   ========================================================= */
+
+async function findSheetPath(
+  zip,
+  workbookXml,
+  sheetName
+) {
+
+  const sheetRegex =
+    new RegExp(
+      `<sheet\\b[^>]*name="${escapeRegex(sheetName)}"[^>]*r:id="([^"]+)"[^>]*/?>`,
+      "i"
+    );
+
+  const match =
+    workbookXml.match(
+      sheetRegex
+    );
+
+  if (!match) {
+    return null;
+  }
+
+  const relId =
+    match[1];
+
+
+  const relsFile =
+    zip.file(
+      "xl/_rels/workbook.xml.rels"
+    );
+
+  if (!relsFile) {
+    return null;
+  }
+
+  const relsXml =
+    await relsFile.async(
+      "string"
+    );
+
+
+  const relRegex =
+    new RegExp(
+      `<Relationship\\b[^>]*Id="${escapeRegex(relId)}"[^>]*Target="([^"]+)"[^>]*/?>`,
+      "i"
+    );
+
+  const relMatch =
+    relsXml.match(
+      relRegex
+    );
+
+  if (!relMatch) {
+    return null;
+  }
+
+
+  let target =
+    relMatch[1];
+
+  target =
+    target.replace(
+      /^\/+/,
+      ""
+    );
+
+  if (
+    !target.startsWith("xl/")
+  ) {
+    target =
+      `xl/${target}`;
+  }
+
+  return target;
+}
+
+
+/* =========================================================
+   XML Z PLIKU
+   ========================================================= */
+
+async function getXml(
+  zip,
+  path
+) {
+
+  const file =
+    zip.file(path);
+
+  if (!file) {
+
+    throw new Error(
+      `Nie znaleziono ${path}.`
+    );
+
+  }
+
+  return await file.async(
+    "string"
+  );
+}
+
+
+/* =========================================================
+   USTAWIANIE WARTOŚCI KOMÓRKI
+   ========================================================= */
+
+function setCellValue(
+  sheetXml,
+  cellReference,
+  value
+) {
+
+  const escaped =
+    xmlEscape(value);
+
+
+  const cellRegex =
+    new RegExp(
+      `<c\\b([^>]*\\br="${escapeRegex(cellReference)}"[^>]*)>[\\s\\S]*?<\\/c>`,
+      "i"
+    );
+
+
+  const existing =
+    sheetXml.match(
+      cellRegex
+    );
+
+
+  if (existing) {
+
+    const attributes =
+      existing[1]
+        .replace(
+          /\s+t="[^"]*"/gi,
+          ""
+        );
+
+    const newCell =
+      `<c${attributes} t="inlineStr"><is><t>${escaped}</t></is></c>`;
+
+    return sheetXml.replace(
+      cellRegex,
+      newCell
+    );
+
+  }
+
+
+  /*
+   * Jeżeli B2 nie istnieje,
+   * dodajemy ją do wiersza 2.
+   */
+
+  const rowRegex =
+    /<row\b([^>]*\br="2"[^>]*)>/i;
+
+  if (
+    rowRegex.test(sheetXml)
+  ) {
+
+    const newCell =
+      `<c r="${cellReference}" t="inlineStr"><is><t>${escaped}</t></is></c>`;
+
+    return sheetXml.replace(
+      rowRegex,
+      `$&${newCell}`
+    );
+
+  }
+
+
+  throw new Error(
+    `Nie znaleziono wiersza 2 dla komórki ${cellReference}.`
+  );
+}
+
+
+/* =========================================================
+   MUFY
+   ========================================================= */
+
+function writeMuffs(
+  sheetXml,
+  muffs
+) {
+
+  /*
+   * F = kolumna 6.
+   *
+   * XLSX zapisuje kolumny:
+   * F, G, H, I...
+   */
+
+  for (
+    let i = 0;
+    i < muffs.length;
+    i++
+  ) {
+
+    const column =
+      numberToColumn(
+        6 + i
+      );
+
+
+    const nameCell =
+      `${column}2`;
+
+    const spliceCell =
+      `${column}4`;
+
+
+    sheetXml =
+      setCellValue(
+        sheetXml,
+        nameCell,
+        muffs[i].name
+      );
+
+
+    sheetXml =
+      setNumericCellValue(
+        sheetXml,
+        spliceCell,
+        muffs[i].splices
+      );
+
+  }
+
+
+  return sheetXml;
+}
+
+
+/* =========================================================
+   LICZBA W KOMÓRCE
+   ========================================================= */
+
+function setNumericCellValue(
+  sheetXml,
+  cellReference,
+  value
+) {
+
+  const cellRegex =
+    new RegExp(
+      `<c\\b([^>]*\\br="${escapeRegex(cellReference)}"[^>]*)>[\\s\\S]*?<\\/c>`,
+      "i"
+    );
+
+
+  const existing =
+    sheetXml.match(
+      cellRegex
+    );
+
+
+  if (existing) {
+
+    const attributes =
+      existing[1]
+        .replace(
+          /\s+t="[^"]*"/gi,
+          ""
+        );
+
+
+    const newCell =
+      `<c${attributes}><v>${Number(value) || 0}</v></c>`;
+
+
+    return sheetXml.replace(
+      cellRegex,
+      newCell
+    );
+
+  }
+
+
+  const rowNumber =
+    cellReference.match(
+      /\d+$/
+    )[0];
+
+
+  const rowRegex =
+    new RegExp(
+      `<row\\b([^>]*\\br="${rowNumber}"[^>]*)>`,
+      "i"
+    );
+
+
+  if (
+    rowRegex.test(sheetXml)
+  ) {
+
+    const newCell =
+      `<c r="${cellReference}"><v>${Number(value) || 0}</v></c>`;
+
+    return sheetXml.replace(
+      rowRegex,
+      `$&${newCell}`
+    );
+
+  }
+
+
+  throw new Error(
+    `Nie znaleziono wiersza ${rowNumber}.`
+  );
 }
 
 
@@ -413,163 +924,177 @@ function extractRunNumber(filename) {
    ODCZYT INFORMACJI O PRZEBIEGACH
    ========================================================= */
 
-function extractRunInformation(workbook) {
+async function extractRunInformation(
+  zip,
+  workbookXml
+) {
+
+  const sharedStrings =
+    await readSharedStrings(
+      zip
+    );
+
+
+  const sheetPaths =
+    await findAllSheetPaths(
+      zip,
+      workbookXml
+    );
+
 
   const result = {
     splicedMuffs: []
   };
 
 
-  for (const sheetName of workbook.SheetNames) {
+  for (
+    const sheetPath of sheetPaths
+  ) {
 
-    const sheet =
-      workbook.Sheets[sheetName];
+    const xml =
+      await getXml(
+        zip,
+        sheetPath
+      );
+
 
     const rows =
-      XLSX.utils.sheet_to_json(
-        sheet,
-        {
-          header: 1,
-          defval: ""
-        }
+      parseSheetRows(
+        xml,
+        sharedStrings
       );
+
+
+    const text =
+      rows
+        .map(
+          row =>
+            row.values.join(" | ")
+        )
+        .join("\n");
+
+
+    if (
+      !text
+        .toLowerCase()
+        .includes(
+          "informacje o przebiegach"
+        )
+    ) {
+
+      continue;
+
+    }
 
 
     /*
-     * Szukamy sekcji "Informacje o przebiegach".
+     * Na razie analizujemy tylko arkusz,
+     * w którym występuje sekcja.
      */
 
-    let sectionFound = false;
-
-
     for (
-      let rowIndex = 0;
-      rowIndex < rows.length;
-      rowIndex++
+      let i = 0;
+      i < rows.length;
+      i++
     ) {
 
       const row =
-        rows[rowIndex];
+        rows[i];
 
-      const text =
-        row
-          .map(value =>
-            String(value)
-              .trim()
-              .toLowerCase()
-          )
-          .join(" ");
 
+      const rowText =
+        row.values
+          .join(" | ");
+
+
+      const lower =
+        rowText.toLowerCase();
+
+
+      /*
+       * "nie istnieje - przecina tube"
+       * musi być sprawdzane jako pierwsze.
+       */
 
       if (
-        text.includes(
-          "informacje o przebiegach"
+        lower.includes(
+          "nie istnieje - przecina tube"
         )
       ) {
 
-        sectionFound = true;
-
-        /*
-         * Po znalezieniu sekcji analizujemy
-         * kolejne wiersze.
-         */
-
-        for (
-          let i = rowIndex + 1;
-          i < rows.length;
-          i++
-        ) {
-
-          const data =
-            rows[i];
-
-          const joined =
-            data
-              .map(value =>
-                String(value).trim()
-              )
-              .join(" | ");
+        const name =
+          findMuffNameFromRow(
+            row
+          );
 
 
-          const lower =
-            joined.toLowerCase();
+        if (name) {
 
+          result.splicedMuffs.push({
 
-          if (
-            lower.includes(
-              "nie istnieje - przecina tube"
-            )
-          ) {
+            name,
 
-            const name =
-              findMuffName(data);
+            splices:
+              12,
 
-            const splices = 12;
+            tubeCut:
+              true,
 
-            if (name) {
+            prepareCableEnd:
+              1
 
-              result.splicedMuffs.push({
-
-                name,
-
-                splices,
-
-                tubeCut: true,
-
-                prepareCableEnd: 1
-
-              });
-
-            }
-
-          }
-
-          else if (
-            lower.includes(
-              "nie istnieje"
-            )
-          ) {
-
-            const name =
-              findMuffName(data);
-
-            const splices =
-              findSpliceCount(
-                data,
-                rows,
-                i
-              );
-
-            if (name) {
-
-              result.splicedMuffs.push({
-
-                name,
-
-                splices,
-
-                tubeCut: false,
-
-                prepareCableEnd: 0
-
-              });
-
-            }
-
-          }
+          });
 
         }
 
-        break;
+        continue;
       }
+
+
+      if (
+        lower.includes(
+          "nie istnieje"
+        )
+      ) {
+
+        const name =
+          findMuffNameFromRow(
+            row
+          );
+
+
+        if (name) {
+
+          const splices =
+            findSpliceCount(
+              row,
+              rows,
+              i
+            );
+
+
+          result.splicedMuffs.push({
+
+            name,
+
+            splices,
+
+            tubeCut:
+              false,
+
+            prepareCableEnd:
+              0
+
+          });
+
+        }
+
+      }
+
     }
 
 
-    if (!sectionFound) {
-      throw new Error(
-        "Nie znaleziono sekcji 'Informacje o przebiegach'."
-      );
-    }
+    break;
 
   }
 
@@ -579,57 +1104,419 @@ function extractRunInformation(workbook) {
 
 
 /* =========================================================
+   WSPÓLNE ARKUSZE
+   ========================================================= */
+
+async function findAllSheetPaths(
+  zip,
+  workbookXml
+) {
+
+  const paths = [];
+
+
+  const relsFile =
+    zip.file(
+      "xl/_rels/workbook.xml.rels"
+    );
+
+
+  if (!relsFile) {
+    return paths;
+  }
+
+
+  const relsXml =
+    await relsFile.async(
+      "string"
+    );
+
+
+  const sheetRegex =
+    /<sheet\b[^>]*r:id="([^"]+)"[^>]*\/?>/gi;
+
+
+  let match;
+
+
+  while (
+    (match =
+      sheetRegex.exec(
+        workbookXml
+      ))
+  ) {
+
+    const relId =
+      match[1];
+
+
+    const relRegex =
+      new RegExp(
+        `<Relationship\\b[^>]*Id="${escapeRegex(relId)}"[^>]*Target="([^"]+)"[^>]*/?>`,
+        "i"
+      );
+
+
+    const rel =
+      relsXml.match(
+        relRegex
+      );
+
+
+    if (!rel) {
+      continue;
+    }
+
+
+    let target =
+      rel[1]
+        .replace(
+          /^\/+/,
+          ""
+        );
+
+
+    if (
+      !target.startsWith("xl/")
+    ) {
+
+      target =
+        `xl/${target}`;
+
+    }
+
+
+    paths.push(target);
+
+  }
+
+
+  return paths;
+}
+
+
+/* =========================================================
+   SHARED STRINGS
+   ========================================================= */
+
+async function readSharedStrings(
+  zip
+) {
+
+  const file =
+    zip.file(
+      "xl/sharedStrings.xml"
+    );
+
+
+  if (!file) {
+    return [];
+  }
+
+
+  const xml =
+    await file.async(
+      "string"
+    );
+
+
+  const strings = [];
+
+
+  const regex =
+    /<si\b[\s\S]*?<\/si>/gi;
+
+
+  let match;
+
+
+  while (
+    (match =
+      regex.exec(xml))
+  ) {
+
+    const si =
+      match[0];
+
+
+    const texts = [];
+
+
+    const textRegex =
+      /<t\b[^>]*>([\s\S]*?)<\/t>/gi;
+
+
+    let t;
+
+
+    while (
+      (t =
+        textRegex.exec(si))
+    ) {
+
+      texts.push(
+        xmlDecode(
+          t[1]
+        )
+      );
+
+    }
+
+
+    strings.push(
+      texts.join("")
+    );
+
+  }
+
+
+  return strings;
+}
+
+
+/* =========================================================
+   WIERSZE ARKUSZA
+   ========================================================= */
+
+function parseSheetRows(
+  xml,
+  sharedStrings
+) {
+
+  const rows = [];
+
+
+  const rowRegex =
+    /<row\b[^>]*\br="(\d+)"[^>]*>[\s\S]*?<\/row>/gi;
+
+
+  let rowMatch;
+
+
+  while (
+    (rowMatch =
+      rowRegex.exec(xml))
+  ) {
+
+    const rowNumber =
+      Number(
+        rowMatch[1]
+      );
+
+
+    const rowXml =
+      rowMatch[0];
+
+
+    const values = [];
+
+
+    const cellRegex =
+      /<c\b([^>]*)>([\s\S]*?)<\/c>/gi;
+
+
+    let cellMatch;
+
+
+    while (
+      (cellMatch =
+        cellRegex.exec(
+          rowXml
+        ))
+    ) {
+
+      const attributes =
+        cellMatch[1];
+
+
+      const content =
+        cellMatch[2];
+
+
+      const refMatch =
+        attributes.match(
+          /\br="([A-Z]+\d+)"/i
+        );
+
+
+      if (!refMatch) {
+        continue;
+      }
+
+
+      const ref =
+        refMatch[1];
+
+
+      const typeMatch =
+        attributes.match(
+          /\bt="([^"]+)"/i
+        );
+
+
+      const type =
+        typeMatch
+          ? typeMatch[1]
+          : "";
+
+
+      let value = "";
+
+
+      const valueMatch =
+        content.match(
+          /<v\b[^>]*>([\s\S]*?)<\/v>/i
+        );
+
+
+      if (valueMatch) {
+
+        value =
+          valueMatch[1];
+
+      }
+
+
+      if (
+        type === "s"
+      ) {
+
+        const index =
+          Number(value);
+
+        value =
+          sharedStrings[index] || "";
+
+      }
+
+      else if (
+        type === "inlineStr"
+      ) {
+
+        const texts = [];
+
+
+        const textRegex =
+          /<t\b[^>]*>([\s\S]*?)<\/t>/gi;
+
+
+        let t;
+
+
+        while (
+          (t =
+            textRegex.exec(
+              content
+            ))
+        ) {
+
+          texts.push(
+            xmlDecode(
+              t[1]
+            )
+          );
+
+        }
+
+
+        value =
+          texts.join("");
+
+      }
+
+      else {
+
+        value =
+          xmlDecode(
+            value
+          );
+
+      }
+
+
+      values.push({
+        ref,
+        value
+      });
+
+    }
+
+
+    rows.push({
+      rowNumber,
+      values:
+        values.map(
+          x => x.value
+        ),
+      cells:
+        values
+    });
+
+  }
+
+
+  return rows;
+}
+
+
+/* =========================================================
    NAZWA MUFY
    ========================================================= */
 
-function findMuffName(row) {
+function findMuffNameFromRow(
+  row
+) {
 
-  /*
-   * Szukamy pierwszej sensownej wartości
-   * zawierającej typowy identyfikator mufy.
-   */
+  for (
+    const cell of row.cells
+  ) {
 
-  for (const value of row) {
+    const value =
+      String(
+        cell.value || ""
+      ).trim();
 
-    const text =
-      String(value).trim();
 
-    if (!text) continue;
+    if (!value) {
+      continue;
+    }
+
 
     const lower =
-      text.toLowerCase();
+      value.toLowerCase();
+
 
     if (
-      lower.includes("nie istnieje")
+      lower.includes(
+        "nie istnieje"
+      )
     ) {
       continue;
     }
 
+
     if (
-      lower.includes("spaw")
+      lower.includes(
+        "liczba spawów"
+      )
     ) {
       continue;
     }
 
+
     if (
-      lower.includes("liczba")
+      lower.includes(
+        "informacje o przebiegach"
+      )
     ) {
       continue;
     }
 
-    /*
-     * Pomijamy oczywiste nagłówki.
-     */
 
-    if (
-      lower ===
-      "informacje o przebiegach"
-    ) {
-      continue;
-    }
+    return value;
 
-    return text;
   }
+
 
   return null;
 }
@@ -646,13 +1533,20 @@ function findSpliceCount(
 ) {
 
   /*
-   * Najpierw szukamy liczby w tym samym wierszu.
+   * Najpierw ten sam wiersz.
    */
 
-  for (let i = 0; i < row.length; i++) {
+  for (
+    let i = 0;
+    i < row.cells.length;
+    i++
+  ) {
 
     const value =
-      String(row[i]).trim();
+      String(
+        row.cells[i].value || ""
+      );
+
 
     if (
       /liczba spawów pomiędzy portem a włóknem/i
@@ -660,15 +1554,27 @@ function findSpliceCount(
     ) {
 
       const next =
-        row[i + 1];
+        row.cells[i + 1];
 
-      const number =
-        Number(next);
 
-      if (
-        Number.isFinite(number)
-      ) {
-        return number;
+      if (next) {
+
+        const number =
+          Number(
+            next.value
+          );
+
+
+        if (
+          Number.isFinite(
+            number
+          )
+        ) {
+
+          return number;
+
+        }
+
       }
 
     }
@@ -677,8 +1583,7 @@ function findSpliceCount(
 
 
   /*
-   * Następnie sprawdzamy sąsiednie
-   * wiersze.
+   * Następnie kilka kolejnych wierszy.
    */
 
   for (
@@ -687,39 +1592,65 @@ function findSpliceCount(
     offset++
   ) {
 
-    const index =
-      rowIndex + offset;
+    const candidate =
+      rows[rowIndex + offset];
 
-    if (
-      index >= rows.length
-    ) {
+
+    if (!candidate) {
       break;
     }
 
-    const candidate =
-      rows[index];
 
-    const text =
-      candidate
-        .map(x => String(x))
-        .join(" ");
+    for (
+      let i = 0;
+      i < candidate.cells.length;
+      i++
+    ) {
+
+      const value =
+        String(
+          candidate.cells[i].value || ""
+        );
 
 
-    const match =
-      text.match(
-        /liczba spawów pomiędzy portem a włóknem[^0-9]*([0-9]+)/i
-      );
+      if (
+        /liczba spawów pomiędzy portem a włóknem/i
+          .test(value)
+      ) {
 
-    if (match) {
-      return Number(match[1]);
+        const next =
+          candidate.cells[i + 1];
+
+
+        if (next) {
+
+          const number =
+            Number(
+              next.value
+            );
+
+
+          if (
+            Number.isFinite(
+              number
+            )
+          ) {
+
+            return number;
+
+          }
+
+        }
+
+      }
+
     }
 
   }
 
 
   /*
-   * Jeżeli informacja istnieje, ale parser
-   * jej nie znalazł, nie zgadujemy.
+   * Nie zgadujemy.
    */
 
   return 0;
@@ -727,131 +1658,40 @@ function findSpliceCount(
 
 
 /* =========================================================
-   UZUPEŁNIENIE SZABLONU
+   NUMER KOLUMNY → LITERA
    ========================================================= */
 
-function fillSettlement(
-  workbook,
-  runNumber,
-  runInfo
+function numberToColumn(
+  number
 ) {
 
-  const sheet =
-    workbook.Sheets["Arkusz1"];
-
-  if (!sheet) {
-    throw new Error(
-      "W szablonie nie znaleziono arkusza Arkusz1."
-    );
-  }
+  let result = "";
 
 
-  /*
-   * B2 = numer przebiegu
-   */
-
-  sheet["B2"] = {
-    t: "s",
-    v: runNumber
-  };
-
-
-  /*
-   * Mufy zaczynamy od F2.
-   *
-   * F = 6
-   */
-
-  const startColumn = 6;
-
-
-  for (
-    let i = 0;
-    i < runInfo.splicedMuffs.length;
-    i++
+  while (
+    number > 0
   ) {
 
-    const muff =
-      runInfo.splicedMuffs[i];
-
-    const column =
-      startColumn + i;
+    const remainder =
+      (number - 1) % 26;
 
 
-    /*
-     * Wiersz 2 — nazwa mufy
-     */
-
-    const nameCell =
-      XLSX.utils.encode_cell({
-        r: 1,
-        c: column - 1
-      });
-
-    sheet[nameCell] = {
-      t: "s",
-      v: muff.name
-    };
+    result =
+      String.fromCharCode(
+        65 + remainder
+      ) +
+      result;
 
 
-    /*
-     * Wiersz 4 — liczba spawów
-     */
-
-    const spliceCell =
-      XLSX.utils.encode_cell({
-        r: 3,
-        c: column - 1
-      });
-
-    sheet[spliceCell] = {
-      t: "n",
-      v: muff.splices
-    };
-
-
-    /*
-     * Przygotowanie końcówki kabla
-     *
-     * W szablonie jest to wiersz 4
-     * prac — Excelowy numer wiersza 5,
-     * czyli indeks 4.
-     *
-     * Ponieważ nie chcemy jeszcze zgadywać
-     * kolumny/pozycji dodatkowej pracy,
-     * zapisujemy ją w modelu wyniku.
-     */
+    number =
+      Math.floor(
+        (number - 1) / 26
+      );
 
   }
 
 
-  /*
-   * Aktualizacja zakresu arkusza.
-   */
-
-  const range =
-    XLSX.utils.decode_range(
-      sheet["!ref"] || "A1"
-    );
-
-  const requiredLastColumn =
-    startColumn +
-    runInfo.splicedMuffs.length -
-    1;
-
-  if (
-    requiredLastColumn >
-    range.e.c
-  ) {
-
-    range.e.c =
-      requiredLastColumn;
-
-    sheet["!ref"] =
-      XLSX.utils.encode_range(range);
-
-  }
-
+  return result;
 }
 
 
@@ -865,10 +1705,111 @@ function makeRootFolder(
 ) {
 
   return (
-    orderNumber.replace(/\//g, "_") +
+    orderNumber
+      .replace(
+        /\//g,
+        "_"
+      ) +
     " " +
     description
   );
+}
+
+
+/* =========================================================
+   BEZPIECZNA NAZWA PLIKU
+   ========================================================= */
+
+function sanitizeFileName(
+  name
+) {
+
+  return name.replace(
+    /[^a-zA-Z0-9._-]/g,
+    "_"
+  );
+}
+
+
+/* =========================================================
+   XML ESCAPE
+   ========================================================= */
+
+function xmlEscape(
+  value
+) {
+
+  return String(value)
+    .replace(
+      /&/g,
+      "&amp;"
+    )
+    .replace(
+      /</g,
+      "&lt;"
+    )
+    .replace(
+      />/g,
+      "&gt;"
+    )
+    .replace(
+      /"/g,
+      "&quot;"
+    )
+    .replace(
+      /'/g,
+      "&apos;"
+    );
+
+}
+
+
+/* =========================================================
+   XML DECODE
+   ========================================================= */
+
+function xmlDecode(
+  value
+) {
+
+  return String(value)
+    .replace(
+      /&lt;/g,
+      "<"
+    )
+    .replace(
+      /&gt;/g,
+      ">"
+    )
+    .replace(
+      /&quot;/g,
+      '"'
+    )
+    .replace(
+      /&apos;/g,
+      "'"
+    )
+    .replace(
+      /&amp;/g,
+      "&"
+    );
+
+}
+
+
+/* =========================================================
+   ESCAPE REGEX
+   ========================================================= */
+
+function escapeRegex(
+  value
+) {
+
+  return String(value)
+    .replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&"
+    );
 
 }
 
@@ -902,7 +1843,7 @@ function json(
 
 
 /* =========================================================
-   FORMULARZ
+   STRONA
    ========================================================= */
 
 function page() {
@@ -991,16 +1932,18 @@ button {
 
 <h1>Agent2</h1>
 
-<form id="jobForm">
+<form
+  id="jobForm"
+>
 
 <label>
 
 Cały wiersz danych zlecenia
 
 <textarea
-name="orderLine"
-placeholder="64/W/2025&#9;03.06.2025&#9;PLAY&#9;KWOT2e&#9;Zlecenie uzgodnienia oraz budowa kabla do BTSa WAR1439A Otwock Tadeusza 22 72j"
-required
+  name="orderLine"
+  placeholder="64/W/2025&#9;03.06.2025&#9;PLAY&#9;KWOT2e&#9;Zlecenie uzgodnienia oraz budowa kabla do BTSa WAR1439A Otwock Tadeusza 22 72j"
+  required
 ></textarea>
 
 </label>
@@ -1010,15 +1953,17 @@ required
 Paczka ZIP
 
 <input
-name="archive"
-type="file"
-accept=".zip,application/zip"
-required
+  name="archive"
+  type="file"
+  accept=".zip,application/zip"
+  required
 >
 
 </label>
 
-<button type="submit">
+<button
+  type="submit"
+>
 
 PRZYJMIJ ZLECENIE
 
@@ -1031,10 +1976,14 @@ PRZYJMIJ ZLECENIE
 <script>
 
 const form =
-  document.getElementById("jobForm");
+  document.getElementById(
+    "jobForm"
+  );
 
 const status =
-  document.getElementById("status");
+  document.getElementById(
+    "status"
+  );
 
 form.addEventListener(
   "submit",
@@ -1072,17 +2021,24 @@ form.addEventListener(
       status.textContent =
         "ROZLICZENIE UTWORZONE\\n\\n" +
 
-        "Numer przebiegu: " +
+        "Numer: " +
         data.source.runNumber +
-
-        "\\n\\nKatalog:\\n" +
-        data.output.rootFolder +
 
         "\\n\\nPlik:\\n" +
         data.output.workbook +
 
-        "\\n\\nID:\\n" +
-        data.id;
+        "\\n\\nMufy:\\n" +
+
+        data.extracted
+          .splicedMuffs
+          .map(
+            muff =>
+              muff.name +
+              " → " +
+              muff.splices +
+              " spawów"
+          )
+          .join("\\n");
 
     }
 
